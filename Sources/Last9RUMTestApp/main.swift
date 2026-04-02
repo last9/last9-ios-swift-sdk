@@ -6,11 +6,15 @@
 ///   S3 — multiple views produce separate view spans
 ///   S4 — session rollover: inactivity timeout → new session.id + previous_id
 ///   S5 — session restore: re-init within timeout → same session.id
+///   S6 — crash reporting: ObjC exception captured with stack trace
 ///
 /// Usage:
 ///   export LAST9_OTLP_ENDPOINT=https://otlp-ext-aps1.last9.io/v1/otlp/organizations/<your-org-slug>/telemetry/client_monitoring
 ///   export LAST9_CLIENT_TOKEN=<your-token>
 ///   swift run Last9RUMTestApp
+///
+/// To run crash test only:
+///   LAST9_CRASH_TEST=1 swift run Last9RUMTestApp
 
 import Foundation
 import Last9RUM
@@ -161,3 +165,49 @@ print("""
 Note: S5 (session restore) — run this test again within 15 min.
       The new run should reuse the SAME session.id as PostRollover.
 """)
+
+// MARK: - S6: Crash reporting (ObjC exception)
+
+if ProcessInfo.processInfo.environment["LAST9_CRASH_TEST"] == "1" {
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("S6 — crash reporting (ObjC exception)")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+    // Fresh SDK init for crash test (separate service name for easy filtering)
+    Last9RUM.initialize(
+        endpoint: endpoint,
+        clientToken: token,
+        serviceName: "last9-rum-crash-test",
+        environment: "ci",
+        origin: origin,
+        hangThreshold: 0
+    )
+
+    Last9RUM.identify(id: "crash-test-user", name: "Crash Tester", email: "ci@last9.io")
+    Last9RUM.startView(name: "CrashView")
+    emitCustomSpan(name: "pre.crash.span", attrs: ["crash.imminent": "true"])
+
+    print("✓  SDK initialized, user identified, CrashView started")
+    print("   Raising NSException in 1s…")
+    Thread.sleep(forTimeInterval: 1)
+
+    // Raise an ObjC uncaught exception — captured by NSSetUncaughtExceptionHandler
+    NSException(
+        name: NSExceptionName("Last9RUMTestCrash"),
+        reason: "Intentional crash for S6 verification — exception.type, exception.message, exception.stacktrace expected in Last9 logs",
+        userInfo: ["test.scenario": "S6", "triggered_by": "Last9RUMTestApp"]
+    ).raise()
+
+    // Handler calls flush internally; extra sleep ensures exporter drains
+    Thread.sleep(forTimeInterval: 5)
+
+    print("""
+
+    ✅  S6 crash emitted.  Verify in Last9 Logs:
+        service.name  = "last9-rum-crash-test"
+        exception.type       = "Last9RUMTestCrash"
+        exception.message    = "Intentional crash for S6 verification…"
+        exception.stacktrace = (stack frames present)
+        session.id, view.id, view.name, user.id should all be stamped
+    """)
+}
