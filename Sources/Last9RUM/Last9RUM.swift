@@ -164,6 +164,13 @@ public final class Last9RUM {
                     guard let host = request.url?.host else { return true }
                     return !host.contains("last9.io")
                 },
+                // Span name: "{METHOD} {path}" — e.g. "GET /api/users"
+                // Replaces the deprecated "HTTP {method}" format from URLSessionInstrumentation.
+                nameSpan: { request in
+                    let method = request.httpMethod ?? "HTTP"
+                    let path = request.url?.path ?? "/"
+                    return "\(method) \(path)"
+                },
                 semanticConvention: .stable
             )
         )
