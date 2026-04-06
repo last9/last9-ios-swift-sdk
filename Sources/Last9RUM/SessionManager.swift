@@ -103,19 +103,24 @@ final class SessionManager {
     }
 
     private func createNewSession(previousId: String?) {
-        let sessionId = UUID().uuidString
         let now = Date()
 
-        store.setCurrentSession(id: sessionId, previousId: previousId, startedAt: now)
+        // Start the span first — its TraceId becomes the session.id,
+        // matching the browser SDK convention expected by the dashboard.
+        let span = tracer.spanBuilder(spanName: "Session Start").startSpan()
+        let sessionId = span.context.traceId.hexString
 
-        // Emit "Session Start" span
-        let span = tracer.spanBuilder(spanName: "Session Start")
-            .setAttribute(key: "session.id", value: sessionId)
-            .startSpan()
+        // Set session.id directly — SessionSpanProcessor.onStart already fired
+        // before the store was updated, so we stamp it manually here.
+        span.setAttribute(key: "session.id", value: AttributeValue.string(sessionId))
         if let previousId = previousId {
-            span.setAttribute(key: "session.previous_id", value: previousId)
+            span.setAttribute(key: "session.previous_id", value: AttributeValue.string(previousId))
         }
         span.end()
+
+        // Update store after span ends so all subsequent spans (View, HTTP, etc.)
+        // get session.id = traceId via SessionSpanProcessor.
+        store.setCurrentSession(id: sessionId, previousId: previousId, startedAt: now)
 
         // Timer only enforces max duration — inactivity is checked on foreground
         scheduleRollover(after: maxDuration)
