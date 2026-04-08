@@ -123,6 +123,14 @@ final class SessionStore {
         persistToDisk()
     }
 
+    /// Update in-memory last-activity timestamp without disk I/O.
+    /// Used on high-frequency events (taps) to avoid excessive writes.
+    func updateLastActivityInMemory() {
+        os_unfair_lock_lock(lock)
+        _sessionLastActivityAt = Date()
+        os_unfair_lock_unlock(lock)
+    }
+
     func clearSession() {
         os_unfair_lock_lock(lock)
         _previousSessionId = _currentSessionId

@@ -17,13 +17,15 @@ import UIKit
 /// Follows Sentry's approach of swizzling `sendEvent` rather than Datadog's gesture recognizer approach.
 final class InteractionTracker {
     private let tracer: Tracer
+    private let store: SessionStore
     private var isInstalled = false
 
-    init(tracerProvider: TracerProvider) {
+    init(tracerProvider: TracerProvider, store: SessionStore = .shared) {
         self.tracer = tracerProvider.get(
             instrumentationName: "interaction",
             instrumentationVersion: last9SDKVersion
         )
+        self.store = store
     }
 
     #if canImport(UIKit)
@@ -60,6 +62,7 @@ final class InteractionTracker {
     }
 
     private func handleTap(_ touch: UITouch) {
+        store.updateLastActivityInMemory()
         guard let view = touch.view else { return }
 
         let targetClass = String(describing: type(of: view))

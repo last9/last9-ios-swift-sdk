@@ -36,6 +36,10 @@ final class SessionManager {
 
     private var rolloverWorkItem: DispatchWorkItem?
 
+    /// Guards against duplicate "Session End" spans for the same session.
+    /// Reset when a new session starts or the session resumes from foreground.
+    private var hasEmittedEnd = false
+
     #if canImport(UIKit)
     private var foregroundObserver: NSObjectProtocol?
     private var backgroundObserver: NSObjectProtocol?
@@ -61,6 +65,23 @@ final class SessionManager {
     func start() {
         restoreOrCreateSession()
         installLifecycleObservers()
+    }
+
+    /// Emit a "Session End" span for the current session.
+    /// Safe to call multiple times — only the first call per session emits.
+    func end() {
+        guard !hasEmittedEnd,
+              let sessionId = store.currentSessionId,
+              let startedAt = store.sessionStartedAt else { return }
+
+        hasEmittedEnd = true
+
+        let timeSpent = Int(Date().timeIntervalSince(startedAt) * 1000)
+        let span = tracer.spanBuilder(spanName: "Session End")
+            .setAttribute(key: "session.id", value: sessionId)
+            .setAttribute(key: "session.time_spent", value: timeSpent)
+            .startSpan()
+        span.end()
     }
 
     func shutdown() {
@@ -94,8 +115,7 @@ final class SessionManager {
                 startedAt: Date(timeIntervalSince1970: persisted.startedAt)
             )
             let remainingDuration = maxDuration - elapsed
-            // Timer only enforces max duration — inactivity is checked on foreground
-            scheduleRollover(after: remainingDuration)
+            scheduleRollover(after: min(remainingDuration, inactivityTimeout))
         } else {
             // Expired — start fresh with link to previous
             createNewSession(previousId: persisted.id)
@@ -121,21 +141,13 @@ final class SessionManager {
         // Update store after span ends so all subsequent spans (View, HTTP, etc.)
         // get session.id = traceId via SessionSpanProcessor.
         store.setCurrentSession(id: sessionId, previousId: previousId, startedAt: now)
+        hasEmittedEnd = false
 
-        // Timer only enforces max duration — inactivity is checked on foreground
-        scheduleRollover(after: maxDuration)
+        scheduleRollover(after: min(maxDuration, inactivityTimeout))
     }
 
     private func rollover() {
-        // Emit "Session End" span
-        if let sessionId = store.currentSessionId, let startedAt = store.sessionStartedAt {
-            let timeSpent = Int(Date().timeIntervalSince(startedAt) * 1000)
-            let span = tracer.spanBuilder(spanName: "Session End")
-                .setAttribute(key: "session.id", value: sessionId)
-                .setAttribute(key: "session.time_spent", value: timeSpent)
-                .startSpan()
-            span.end()
-        }
+        end()
 
         let previousId = store.currentSessionId
         store.clearSession()
@@ -144,9 +156,12 @@ final class SessionManager {
         NotificationCenter.default.post(name: .last9SessionDidRollover, object: nil)
     }
 
-    // MARK: - Foreground Check
-
-    private func handleForeground() {
+    /// Re-checks session validity before rolling over.
+    /// iOS equivalent of the browser SDK's `_checkAndMaybeRollover()`.
+    ///
+    /// When the rollover timer fires, user taps may have updated `lastActivityAt`
+    /// since the timer was scheduled. If so, the session is still valid — reschedule.
+    private func checkAndMaybeRollover() {
         guard let startedAt = store.sessionStartedAt,
               let lastActivity = store.sessionLastActivityAt else {
             createNewSession(previousId: nil)
@@ -166,12 +181,35 @@ final class SessionManager {
         }
     }
 
+    // MARK: - Foreground Check
+
+    private func handleForeground() {
+        guard let startedAt = store.sessionStartedAt,
+              let lastActivity = store.sessionLastActivityAt else {
+            createNewSession(previousId: nil)
+            return
+        }
+
+        let now = Date()
+        let elapsed = now.timeIntervalSince(startedAt)
+        let inactiveFor = now.timeIntervalSince(lastActivity)
+
+        if elapsed >= maxDuration || inactiveFor >= inactivityTimeout {
+            rollover()
+        } else {
+            hasEmittedEnd = false
+            store.updateLastActivity()
+            let remainingDuration = maxDuration - elapsed
+            scheduleRollover(after: min(remainingDuration, inactivityTimeout))
+        }
+    }
+
     // MARK: - Timer
 
     private func scheduleRollover(after interval: TimeInterval) {
         cancelRollover()
         let work = DispatchWorkItem { [weak self] in
-            self?.rollover()
+            self?.checkAndMaybeRollover()
         }
         rolloverWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + interval, execute: work)

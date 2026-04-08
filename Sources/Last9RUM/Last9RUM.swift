@@ -210,7 +210,7 @@ public final class Last9RUM {
         appLaunchTracker.start()
 
         // 15. User interaction tracking (taps via UIApplication.sendEvent swizzle)
-        self.interactionTracker = InteractionTracker(tracerProvider: self.tracerProvider)
+        self.interactionTracker = InteractionTracker(tracerProvider: self.tracerProvider, store: SessionStore.shared)
         #if canImport(UIKit)
         interactionTracker.install()
         #endif
@@ -339,11 +339,13 @@ public final class Last9RUM {
     @objc private func appDidEnterBackground() {
         emitLifecycleEvent(state: "background")
         watchdogDetector.updateAppState("background")
+        sessionManager.end()
         flush()
     }
     @objc private func appWillEnterForeground() { emitLifecycleEvent(state: "foreground") }
     @objc private func appWillTerminate() {
         emitLifecycleEvent(state: "terminate")
+        sessionManager.end()
         shutdown()
     }
     #endif
